@@ -49,9 +49,13 @@ def cleanup_expired() -> int:
 
 
 def _parse_usernames(raw: str) -> list[str]:
-    # Поддерживает @user, @user2 и формат вроде «1 @user1».
-    names = re.findall(r"(?<![\w])@([A-Za-z0-9_]{5,32})", raw or "")
-    result = []
+    """Извлекает ВСЕ Telegram username из строки, в том числе после запятых.
+
+    Поддерживает варианты «@username1, @username2» и «1 @username1, 2 @username2».
+    В Telegram username должен содержать от 5 до 32 символов.
+    """
+    names = re.findall(r"@([A-Za-z0-9_]{5,32})(?![A-Za-z0-9_])", raw or "")
+    result: list[str] = []
     for name in names:
         name = name.lower()
         if name not in result:
