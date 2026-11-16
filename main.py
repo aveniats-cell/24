@@ -45,6 +45,7 @@ import reputation
 import blacklist
 import helper
 import home_menu
+import secretsms
 
 
 logging.basicConfig(
@@ -437,6 +438,8 @@ async def post_init(app: Application) -> None:
     await accounts.init_db()
     await premium.init_db()
     await helper.init_db()
+    secretsms.init_db()
+    secretsms.cleanup_expired()
     await sss.restore_sss_members()
     await resolver.start_client()
     await commands_dop_handlers.sync_to_db()
@@ -457,6 +460,11 @@ async def post_init(app: Application) -> None:
             _cleanup_polls_job,
             interval=60,
             first=60,
+        )
+        app.job_queue.run_repeating(
+            secretsms.cleanup_job,
+            interval=300,
+            first=300,
         )
 
         economy.register_jobs(app)
@@ -527,6 +535,8 @@ def build_app() -> Application:
                 if update.effective_message else None,
             )
         try:
+            if await secretsms.handle_private_update(update, context, CHAT_ID):
+                raise ApplicationHandlerStop
             await helper.handle_private_update(update, context, ADMIN_ID)
         except ApplicationHandlerStop:
             # Штатный «стоп» — пробрасываем, чтобы обновление не ушло в другие группы.
@@ -578,6 +588,7 @@ def build_app() -> Application:
     app.add_handler(
         CallbackQueryHandler(accounts.account_callback, pattern=r"^acc:")
     )
+    app.add_handler(CallbackQueryHandler(secretsms.read_callback, pattern=r"^secretread:"))
     app.add_handler(CommandHandler("ping", cmd_ping))
     app.add_handler(CommandHandler("stats", cmd_admin_stats))
     app.add_handler(CommandHandler("check", pr.recheck_subscription))
