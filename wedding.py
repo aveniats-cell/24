@@ -22,6 +22,7 @@ from ui_design import InlineKeyboardButton
 
 import db
 import resolver
+import premium
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,25 @@ USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{5,32})")
 
 # Должно совпадать с marriage_xp.XP_PER_LEVEL и db.XP_PER_LEVEL.
 XP_PER_LEVEL = 50
+
+
+async def _premium_marks(user_ids: list[int]) -> dict[int, str]:
+    """Возвращает значки активных Premium-подписок для пользователей."""
+    marks: dict[int, str] = {}
+    for uid in dict.fromkeys(int(value) for value in user_ids if int(value) > 0):
+        try:
+            subscription = await premium.get(uid)
+        except Exception:
+            logger.exception("Не удалось проверить Premium для пользователя %s", uid)
+            continue
+        if not subscription or not subscription.get("active"):
+            continue
+        plan = str(subscription.get("plan") or "").lower()
+        if plan == "pro":
+            marks[uid] = "💎"
+        elif plan == "base":
+            marks[uid] = "🤑"
+    return marks
 
 
 def _is_admin(user_id: int) -> bool:
@@ -546,14 +566,24 @@ async def cmd_marriage_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     lines = ["💍 <b>Топ браки</b> (активные обгоняют старых)"]
+    participant_ids = [
+        int(uid)
+        for marriage in rows
+        for uid in (marriage["user1_id"], marriage["user2_id"])
+    ]
+    marks = await _premium_marks(participant_ids)
     for i, m in enumerate(rows, start=1):
         n1 = await _name_of(context, m["user1_id"])
         n2 = await _name_of(context, m["user2_id"])
         level = _marriage_level(m.get("married_at") or m.get("created_at"), m["xp"])
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+        mark1 = marks.get(int(m["user1_id"]), "")
+        mark2 = marks.get(int(m["user2_id"]), "")
+        display_n1 = f"{escape(n1)}{(' ' + mark1) if mark1 else ''}"
+        display_n2 = f"{escape(n2)}{(' ' + mark2) if mark2 else ''}"
         lock = " 🔒" if m["forced"] else ""
         lines.append(
-            f"{medal} {escape(n1)} + {escape(n2)}{lock} — "
+            f"{medal} {display_n1} + {display_n2}{lock} — "
             f"ур. <b>{level}</b> · <b>{m['xp']}</b> XP"
         )
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
