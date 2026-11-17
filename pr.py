@@ -14,7 +14,7 @@ from telegram import (
 )
 from telegram.constants import ParseMode, ChatType
 from telegram.error import TelegramError
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ApplicationHandlerStop
 
 from ui_design import InlineKeyboardButton
 
@@ -34,7 +34,7 @@ _SUBSCRIPTION_LOCKS = tuple(asyncio.Lock() for _ in range(64))
 
 _USER_SYNC_CACHE: dict[int, tuple[float, str, str]] = {}
 
-_SUBSCRIPTION_TTL = 300
+_SUBSCRIPTION_TTL = 5
 _USER_SYNC_TTL = 3600
 _CACHE_MAX_USERS = 10000
 
@@ -102,11 +102,15 @@ async def _cached_subscription(bot, user_id: int) -> bool | None:
         result = await is_subscribed(bot, user_id)
 
         if result is not None:
-            _SUBSCRIPTION_CACHE[user_id] = (
-                now + _SUBSCRIPTION_TTL,
-                result,
-            )
-
+            # Кэшируем только подтверждённую подписку. Отрицательный результат
+            # не кэшируется: после подписки следующий запрос сразу перепроверит её.
+            if result:
+                _SUBSCRIPTION_CACHE[user_id] = (
+                    now + _SUBSCRIPTION_TTL,
+                    True,
+                )
+            else:
+                _SUBSCRIPTION_CACHE.pop(user_id, None)
             await db.set_subscription(user_id, result)
 
         _trim_caches(now)
@@ -154,8 +158,8 @@ def _is_normal_user_message(update: Update) -> bool:
     """Разрешаем проверку только обычных сообщений пользователей."""
 
     msg = update.effective_message
-    user = update.effective_user
     chat = update.effective_chat
+    user = accounts.actual_user(update) or (msg.from_user if msg else None)
 
     if not msg or not user or not chat:
         return False
@@ -196,6 +200,8 @@ async def is_subscribed(bot, user_id: int) -> bool | None:
             user_id=user_id,
         )
 
+        if member.status == ChatMember.RESTRICTED:
+            return bool(member.is_member)
         return member.status not in (
             ChatMember.LEFT,
             ChatMember.BANNED,
@@ -254,9 +260,10 @@ async def check_and_delete(
         return
 
     msg = update.effective_message
-    user = update.effective_user
-    # Подписка и профиль Telegram — всегда реальный аккаунт, не аккаунт бота.
-    real_user = accounts.actual_user(update) or user
+    # Подписка и профиль Telegram — всегда реальный аккаунт отправителя.
+    real_user = accounts.actual_user(update) or (msg.from_user if msg else None)
+    if not real_user:
+        return
 
     try:
         bot_id = context.bot.id
@@ -264,9 +271,6 @@ async def check_and_delete(
         bot_id = 0
 
     if bot_id and _is_reply_to_bot(msg, bot_id):
-        return
-
-    if _looks_like_admin_command(msg.text or ""):
         return
 
     try:
@@ -303,7 +307,7 @@ async def check_and_delete(
     try:
         await context.bot.send_message(
             chat_id=msg.chat_id,
-            text=_subscription_text(user),
+            text=_subscription_text(real_user),
             parse_mode=ParseMode.HTML,
             reply_markup=_subscription_keyboard(),
             disable_web_page_preview=True,
@@ -313,6 +317,9 @@ async def check_and_delete(
             "Не удалось отправить напоминание: %s",
             e,
         )
+
+    # Не передаём удалённое сообщение следующим обработчикам команд.
+    raise ApplicationHandlerStop
 
 
 async def on_new_member(
@@ -399,10 +406,13 @@ async def recheck_subscription(
 
     await db.set_subscription(user.id, ok)
 
-    _SUBSCRIPTION_CACHE[user.id] = (
-        time.monotonic() + _SUBSCRIPTION_TTL,
-        ok,
-    )
+    if ok:
+        _SUBSCRIPTION_CACHE[user.id] = (
+            time.monotonic() + _SUBSCRIPTION_TTL,
+            True,
+        )
+    else:
+        _SUBSCRIPTION_CACHE.pop(user.id, None)
 
     if ok:
         await msg.reply_text(
