@@ -52,6 +52,7 @@ _CACHE_MAX_USERS = 10000
 _PENDING: dict[tuple[int, int, str], int] = defaultdict(int)
 _PENDING_SALARY: dict[tuple[int, int, str], int] = defaultdict(int)
 _flush_lock = asyncio.Lock()
+_salary_locks: dict[tuple[int, int, str], asyncio.Lock] = {}
 
 
 
@@ -101,11 +102,12 @@ async def _premium_marks(user_ids: list[int]) -> dict[int, str]:
     return result
 
 
-def _display_name(user_id: int) -> str:
+def _display_name(user_id: int, names: dict[int, str] | None = None) -> str:
     cached = _USER_CACHE.get(user_id)
     if cached:
-        return cached[1] or cached[0] or str(user_id)
-    return str(user_id)
+        username, first_name = cached
+        return f"@{username}" if username else (first_name or (names or {}).get(user_id, "Пользователь"))
+    return (names or {}).get(user_id, "Пользователь")
 
 
 def _today() -> str:
@@ -198,8 +200,11 @@ async def _flush() -> None:
         if frac_delta <= 0:
             continue
         saved = False
+        salary_event_key = uuid.uuid4().hex
         for attempt in range(3):
-            saved = await db.add_pending_salary(chat_id, user_id, day, frac_delta)
+            saved = await db.add_pending_salary(
+                chat_id, user_id, day, frac_delta, event_key=salary_event_key,
+            )
             if saved:
                 break
             await asyncio.sleep(0.5 * (attempt + 1))
@@ -216,29 +221,34 @@ async def _flush() -> None:
 
 
 async def _pay_pending_salary(chat_id: int, user_id: int, day: str) -> None:
-    """Пытается выплатить накопленное из pending_salary.
-    Если казна пуста — оставляет в pending_salary до следующего тика.
-    """
-    frac = await db.get_pending_salary(chat_id, user_id, day)
-    if frac <= 0:
-        return
+    """Пытается выплатить накопленное; блокировка не даёт двум job забрать одну сумму."""
+    key = (chat_id, user_id, day)
+    lock = _salary_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        frac = await db.get_pending_salary(chat_id, user_id, day)
+        if frac <= 0:
+            return
 
-    taken = await db.take_pending_salary(chat_id, user_id, day, frac)
-    if taken <= 0:
-        return
+        taken = await db.take_pending_salary(chat_id, user_id, day, frac)
+        if taken <= 0:
+            return
 
-    coins = await db.pay_salary_from_treasury(chat_id, user_id, day, taken)
-    if coins is None:
-        logger.info(
-            "salary: не выплачено, возврат в pending_salary (chat=%s user=%s frac=%s)",
-            chat_id, user_id, taken,
-        )
-        await db.return_pending_salary(chat_id, user_id, day, taken)
-    else:
-        logger.info(
-            "salary: выплачено coins=%s (chat=%s user=%s frac_was=%s)",
-            coins, chat_id, user_id, taken,
-        )
+        coins = await db.pay_salary_from_treasury(chat_id, user_id, day, taken)
+        if coins is None:
+            logger.info(
+                "salary: не выплачено, возврат в pending_salary (chat=%s user=%s frac=%s)",
+                chat_id, user_id, taken,
+            )
+            if not await db.return_pending_salary(chat_id, user_id, day, taken):
+                logger.critical(
+                    "salary: не удалось восстановить pending chat=%s user=%s frac=%s",
+                    chat_id, user_id, taken,
+                )
+        else:
+            logger.info(
+                "salary: выплачено coins=%s (chat=%s user=%s frac_was=%s)",
+                coins, chat_id, user_id, taken,
+            )
 
 
 async def flush_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -296,34 +306,36 @@ def _medal(i: int) -> str:
 
 
 async def _build_top_text(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, limit: int = 50,
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, limit: int = 10,
     title: str = "🏆 Топ чата",
 ) -> str:
     rows = await db.top_messages(chat_id, limit=limit)
     if not rows:
         return "Пока никто не писал — топ пуст."
+    names = await db.get_user_display_names([int(uid) for uid, _ in rows])
     marks = await _premium_marks([int(uid) for uid, _ in rows])
     lines = [f"<b>{escape(title)}</b>"]
     for i, (uid, cnt) in enumerate(rows, start=1):
         uid = int(uid)
-        name = _display_name(uid)
+        name = _display_name(uid, names)
         mark = f" {marks[uid]}" if uid in marks else ""
         lines.append(f"{_medal(i)} {escape(name)}{mark} — <b>{cnt}</b>")
     return "\n".join(lines)
 
 
 async def _build_top_day_text(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, limit: int = 50,
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, limit: int = 10,
 ) -> str:
     day = _today()
     rows = await db.top_messages_day(chat_id, day, limit=limit)
     if not rows:
         return "Сегодня ещё никто не писал — топ дня пуст."
+    names = await db.get_user_display_names([int(uid) for uid, _ in rows])
     marks = await _premium_marks([int(uid) for uid, _ in rows])
     lines = [f"<b>🏆 Топ за день ({day})</b>"]
     for i, (uid, cnt) in enumerate(rows, start=1):
         uid = int(uid)
-        name = _display_name(uid)
+        name = _display_name(uid, names)
         mark = f" {marks[uid]}" if uid in marks else ""
         lines.append(f"{_medal(i)} {escape(name)}{mark} — <b>{cnt}</b>")
     return "\n".join(lines)
@@ -338,7 +350,7 @@ async def cmd_top_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _flush()
     except Exception:
         pass
-    text = await _build_top_text(context, chat.id, limit=50, title="🏆 Топ за всё время")
+    text = await _build_top_text(context, chat.id, limit=10, title="🏆 Топ за всё время")
     await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -351,18 +363,20 @@ async def cmd_top_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _flush()
     except Exception:
         pass
-    text = await _build_top_day_text(context, chat.id, limit=50)
+    text = await _build_top_day_text(context, chat.id, limit=10)
     await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_top_rich(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает рейтинг пользователей по сумме кошелька и сберкнижки."""
+    """Показывает рейтинг участников чата по кошельку и сберкнижке."""
     msg = update.effective_message
-    if not msg:
+    chat = update.effective_chat
+    if not msg or not chat:
         return
 
     try:
-        rows = await db.top_balances(limit=50)
+        await _flush()
+        rows = await db.top_balances(limit=10, chat_id=chat.id)
     except Exception:
         logger.exception("Не удалось получить топ богачей")
         await msg.reply_text("Не удалось загрузить топ богачей. Попробуйте позже.")
@@ -376,10 +390,11 @@ async def cmd_top_rich(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>💰 Топ богачей</b>",
         "<i>Учитываются монеты в кошельке и сберкнижке.</i>",
     ]
+    names = await db.get_user_display_names([int(user_id) for user_id, _ in rows])
     marks = await _premium_marks([int(user_id) for user_id, _ in rows])
     for i, (user_id, wealth) in enumerate(rows, start=1):
         user_id = int(user_id)
-        name = _display_name(user_id)
+        name = _display_name(user_id, names)
         try:
             amount = int(wealth or 0)
         except (TypeError, ValueError):
