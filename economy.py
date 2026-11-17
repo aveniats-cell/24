@@ -735,37 +735,45 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not user or not msg:
         return
     day = _today_utc()
-    coins_val = await db.get_salary_today(user.id, day)
-    frac = await db.get_salary_frac(user.id, day)
+    paid_coins = int(await db.get_salary_today(user.id, day) or 0)
+    frac = int(await db.get_salary_frac(user.id, day) or 0)
+    # pending_salary содержит заработанные, но ещё не выплаченные из казны дроби.
+    pending = 0
+    if TAX_REPORT_CHAT_ID:
+        pending = int(await db.get_pending_salary(TAX_REPORT_CHAT_ID, user.id, day) or 0)
+    earned_hundredths = paid_coins * 100 + frac + pending
+    earned = f"{earned_hundredths // 100}.{earned_hundredths % 100:02d}"
+    pending_text = f"\nОжидает выплаты из казны: <b>{pending // 100}.{pending % 100:02d}</b> монет" if pending else ""
     await msg.reply_text(
         f"💼 <b>Зарплата за сегодня</b>\n"
-        f"Начислено: <b>{coins_val}.{frac:02d}</b> монет\n\n"
+        f"Всего заработано: <b>{earned}</b> монет{pending_text}\n\n"
         f"<i>1 сообщение ≥ 2 символов = 0.20 монеты. "
-        f"Дроби копятся, в баланс уходят целыми.</i>",
+        f"Дроби копятся; целые монеты выплачиваются из казны.</i>",
         parse_mode=ParseMode.HTML,
     )
 
 
 async def cmd_top_rich(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
+    """Совместимый обработчик топа богачей: только 10 участников чата."""
     chat = update.effective_chat
     msg = update.effective_message
-    if not user or not chat or not msg:
+    if not chat or not msg:
         return
-    rows = await db.top_balances(20)
+    try:
+        rows = await db.top_balances(limit=10, chat_id=chat.id)
+        names = await db.get_user_display_names([int(uid) for uid, _ in rows])
+    except Exception:
+        logger.exception("Не удалось получить топ богачей")
+        await msg.reply_text("Не удалось загрузить топ богачей. Попробуйте позже.")
+        return
     if not rows:
         await msg.reply_text("Топ богачей пуст.")
         return
-    lines = ["💰 <b>Топ богачи</b>"]
-    for i, (uid, bal) in enumerate(rows, start=1):
-        name = str(uid)
-        try:
-            c = await context.bot.get_chat(uid)
-            name = c.first_name or c.username or str(uid)
-        except TelegramError:
-            pass
+    lines = ["💰 <b>Топ богачей</b>"]
+    for i, (uid, wealth) in enumerate(rows, start=1):
+        name = names.get(int(uid), "Пользователь")
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        lines.append(f"{medal} {escape(name)} — <b>{bal}</b>")
+        lines.append(f"{medal} {escape(name)} — <b>{int(wealth or 0):,}</b> 🪙")
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
