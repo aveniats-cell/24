@@ -57,48 +57,29 @@ _salary_locks: dict[tuple[int, int, str], asyncio.Lock] = {}
 
 
 async def _premium_marks(user_ids: list[int]) -> dict[int, str]:
-    """Получает Premium-статусы одним SQL-запросом вместо N запросов."""
-    now = asyncio.get_running_loop().time()
+    """Получает актуальные метки через Premium API.
+
+    Не используем длительный отрицательный кеш: после покупки подписки
+    метка должна появиться сразу, а не через несколько минут.
+    """
     result: dict[int, str] = {}
-    missing = []
-    for uid in user_ids:
-        cached = _PREMIUM_CACHE.get(uid)
-        if cached and cached[0] > now:
-            if cached[1]:
-                result[uid] = cached[1]
-        else:
-            missing.append(uid)
-
-    if missing:
-        # Ограничиваем размер IN, чтобы не упираться в лимит параметров SQL.
-        for start in range(0, len(missing), 400):
-            batch = missing[start:start + 400]
-            placeholders = ",".join("?" for _ in batch)
-            rs = await db._exec(
-                f"""SELECT user_id, plan FROM premium_subscriptions
-                    WHERE user_id IN ({placeholders})
-                      AND julianday(expires_at) > julianday('now')""",
-                batch,
-            )
-            active = {}
-            if not getattr(rs, "error", False):
-                active = {
-                    int(uid): ("💎" if plan == "pro" else "🤑")
-                    for uid, plan in rs.rows
-                }
-            for uid in batch:
-                mark = active.get(uid)
-                _PREMIUM_CACHE[uid] = (now + _PREMIUM_CACHE_TTL, mark)
-                if mark:
-                    result[uid] = mark
-
-    if len(_PREMIUM_CACHE) > _CACHE_MAX_USERS:
-        # TTL cache: удаляем истёкшие записи; при переполнении — очищаем целиком.
-        expired = [uid for uid, (expiry, _) in _PREMIUM_CACHE.items() if expiry <= now]
-        for uid in expired:
+    ids = list(dict.fromkeys(int(uid) for uid in user_ids if int(uid) > 0))
+    for uid in ids:
+        try:
+            subscription = await premium.get(uid)
+        except Exception:
+            logger.exception("Не удалось проверить Premium для пользователя %s", uid)
+            continue
+        if not subscription or not subscription.get("active"):
             _PREMIUM_CACHE.pop(uid, None)
-        if len(_PREMIUM_CACHE) > _CACHE_MAX_USERS:
-            _PREMIUM_CACHE.clear()
+            continue
+
+        plan = str(subscription.get("plan") or "").lower()
+        if plan == "pro":
+            result[uid] = "💎"
+        elif plan == "base":
+            result[uid] = "🤑"
+        _PREMIUM_CACHE.pop(uid, None)
     return result
 
 
@@ -108,6 +89,28 @@ def _display_name(user_id: int, names: dict[int, str] | None = None) -> str:
         username, first_name = cached
         return f"@{username}" if username else (first_name or (names or {}).get(user_id, "Пользователь"))
     return (names or {}).get(user_id, "Пользователь")
+
+
+async def _resolve_display_names(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_ids: list[int],
+) -> dict[int, str]:
+    """Имена сначала берём из БД, а для старых записей восстанавливаем из Telegram."""
+    ids = list(dict.fromkeys(int(uid) for uid in user_ids if int(uid) > 0))
+    names = await db.get_user_display_names(ids)
+    missing = [uid for uid in ids if not names.get(uid) or names[uid] == "Пользователь"]
+    for uid in missing:
+        try:
+            member = await context.bot.get_chat_member(chat_id=chat_id, user_id=uid)
+            user = member.user
+            username = (user.username or "").strip().lstrip("@")
+            first_name = (user.first_name or "").strip()
+            display = f"@{username}" if username else (first_name or "Пользователь")
+            names[uid] = display
+            await db.upsert_user(uid, user.username, user.first_name or "")
+            _USER_CACHE[uid] = (user.username or "", user.first_name or "")
+        except Exception as exc:
+            logger.debug("Не удалось получить имя участника %s из чата %s: %s", uid, chat_id, exc)
+    return names
 
 
 def _today() -> str:
@@ -312,7 +315,7 @@ async def _build_top_text(
     rows = await db.top_messages(chat_id, limit=limit)
     if not rows:
         return "Пока никто не писал — топ пуст."
-    names = await db.get_user_display_names([int(uid) for uid, _ in rows])
+    names = await _resolve_display_names(context, chat_id, [int(uid) for uid, _ in rows])
     marks = await _premium_marks([int(uid) for uid, _ in rows])
     lines = [f"<b>{escape(title)}</b>"]
     for i, (uid, cnt) in enumerate(rows, start=1):
@@ -330,7 +333,7 @@ async def _build_top_day_text(
     rows = await db.top_messages_day(chat_id, day, limit=limit)
     if not rows:
         return "Сегодня ещё никто не писал — топ дня пуст."
-    names = await db.get_user_display_names([int(uid) for uid, _ in rows])
+    names = await _resolve_display_names(context, chat_id, [int(uid) for uid, _ in rows])
     marks = await _premium_marks([int(uid) for uid, _ in rows])
     lines = [f"<b>🏆 Топ за день ({day})</b>"]
     for i, (uid, cnt) in enumerate(rows, start=1):
@@ -390,7 +393,7 @@ async def cmd_top_rich(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>💰 Топ богачей</b>",
         "<i>Учитываются монеты в кошельке и сберкнижке.</i>",
     ]
-    names = await db.get_user_display_names([int(user_id) for user_id, _ in rows])
+    names = await _resolve_display_names(context, chat.id, [int(user_id) for user_id, _ in rows])
     marks = await _premium_marks([int(user_id) for user_id, _ in rows])
     for i, (user_id, wealth) in enumerate(rows, start=1):
         user_id = int(user_id)
