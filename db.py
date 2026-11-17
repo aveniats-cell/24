@@ -314,6 +314,16 @@ async def _create_tables() -> None:
         )
     """)
     await _exec_required("""
+        CREATE TABLE IF NOT EXISTS pending_salary_events (
+            event_key  TEXT PRIMARY KEY,
+            chat_id    INTEGER NOT NULL,
+            user_id    INTEGER NOT NULL,
+            day        TEXT NOT NULL,
+            frac_delta INTEGER NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    await _exec_required("""
         CREATE TABLE IF NOT EXISTS user_cosmetics (
             user_id        INTEGER PRIMARY KEY,
             title          TEXT,
@@ -562,6 +572,18 @@ async def _migrate_tables() -> None:
     # SQL-операции, что и изменение долга. Это исключает рассинхронизацию
     # баланса пользователя и казны при сетевой ошибке между двумя запросами.
     await _exec_required("""
+        CREATE TRIGGER IF NOT EXISTS trg_pending_salary_event_apply
+        AFTER INSERT ON pending_salary_events
+        BEGIN
+            INSERT INTO pending_salary (chat_id, user_id, day, frac_delta)
+            VALUES (NEW.chat_id, NEW.user_id, NEW.day, NEW.frac_delta)
+            ON CONFLICT(chat_id, user_id, day) DO UPDATE SET
+                frac_delta = pending_salary.frac_delta + excluded.frac_delta,
+                updated_at = datetime('now');
+        END
+    """)
+
+    await _exec_required("""
         CREATE TRIGGER IF NOT EXISTS trg_credit_issue_from_treasury
         BEFORE UPDATE OF credit ON users
         WHEN NEW.credit > OLD.credit
@@ -660,6 +682,30 @@ async def upsert_user(user_id: int, username: Optional[str], first_name: str) ->
              first_name=excluded.first_name""",
         [user_id, username or "", first_name or ""],
     )
+
+
+async def get_user_display_names(user_ids: List[int]) -> dict[int, str]:
+    """Возвращает публичные имена пользователей без Telegram ID в топах."""
+    ids = list(dict.fromkeys(int(uid) for uid in user_ids if int(uid) > 0))
+    result: dict[int, str] = {}
+    for start in range(0, len(ids), 400):
+        batch = ids[start:start + 400]
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        rs = await _exec(
+            f"SELECT user_id, username, first_name FROM users WHERE user_id IN ({placeholders})",
+            batch,
+        )
+        if getattr(rs, "error", False):
+            logger.warning("get_user_display_names: не удалось получить имена")
+            continue
+        for uid, username, first_name in rs.rows:
+            username = (username or "").strip().lstrip("@")
+            first_name = (first_name or "").strip()
+            # Username удобнее и однозначнее; если его нет — показываем имя.
+            result[int(uid)] = f"@{username}" if username else (first_name or "Пользователь")
+    return result
 
 
 async def get_user(user_id: int) -> Optional[dict]:
@@ -1414,17 +1460,18 @@ async def transfer_atomic(from_id: int, to_id: int, amount: int, fee: int) -> bo
 # ---------- pending_salary ----------
 
 async def add_pending_salary(chat_id: int, user_id: int, day: str,
-                             frac_delta: int) -> bool:
+                             frac_delta: int, event_key: Optional[str] = None) -> bool:
+    """Надёжно добавляет дробную зарплату ровно один раз по ключу события."""
     if frac_delta <= 0:
         return True
+    key = event_key or uuid.uuid4().hex
     rs = await _exec(
-        """INSERT INTO pending_salary (chat_id, user_id, day, frac_delta)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(chat_id, user_id, day) DO UPDATE SET
-             frac_delta = pending_salary.frac_delta + excluded.frac_delta,
-             updated_at = datetime('now')""",
-        [chat_id, user_id, day, frac_delta],
+        """INSERT OR IGNORE INTO pending_salary_events
+           (event_key, chat_id, user_id, day, frac_delta)
+           VALUES (?, ?, ?, ?, ?)""",
+        [key, chat_id, user_id, day, frac_delta],
     )
+    # Повтор с тем же ключом — успешная идемпотентная операция.
     return not getattr(rs, "error", False)
 
 
@@ -1476,10 +1523,13 @@ async def return_pending_salary(chat_id: int, user_id: int, day: str,
 
 
 async def cleanup_pending_salary(keep_days: int = 2) -> int:
+    days_mod = f"-{int(keep_days)} days"
     rs = await _exec(
-        "DELETE FROM pending_salary WHERE day < date('now', ?)",
-        [f"-{int(keep_days)} days"],
+        "DELETE FROM pending_salary WHERE day < date('now', ?)", [days_mod],
     )
+    if getattr(rs, "error", False):
+        return 0
+    await _exec("DELETE FROM pending_salary_events WHERE day < date('now', ?)", [days_mod])
     return getattr(rs, "rows_affected", 0) or 0
 
 
@@ -1550,8 +1600,8 @@ async def add_salary_frac_atomic(
 async def pay_salary_from_treasury(
     chat_id: int, user_id: int, day: str, frac_delta: int,
 ) -> Optional[int]:
-    """при сбое UPDATE users возвращаем и coins в казну,
-    и new_frac в pending_salary, чтобы не терять дробную часть."""
+    """Выплачивает зарплату из казны. При ошибке возвращает None;
+    входящий pending восстанавливает вызывающий код ровно один раз."""
     logger.info("salary: chat=%s user=%s frac_in=%s", chat_id, user_id, frac_delta)
     if frac_delta <= 0:
         return 0
@@ -1561,7 +1611,6 @@ async def pay_salary_from_treasury(
         [user_id],
     )
     if getattr(rs, "error", False):
-        await return_pending_salary(chat_id, user_id, day, frac_delta)
         return None
     if rs.rows:
         cur_frac, cur_day = rs.rows[0]
@@ -1580,13 +1629,11 @@ async def pay_salary_from_treasury(
         logger.info("salary: treasury_before=%s coins=%s", cur_treasury, coins)
         if cur_treasury <= 0:
             logger.info("salary: казна пуста, зарплата не платится")
-            await return_pending_salary(chat_id, user_id, day, frac_delta)
             return None
         take = min(coins, cur_treasury)
         ok = await treasury_withdraw(chat_id, take)
         logger.info("salary: withdraw ok=%s take=%s", ok, take)
         if not ok:
-            await return_pending_salary(chat_id, user_id, day, frac_delta)
             return None
         coins = take
         if coins < total_frac // 100:
@@ -1617,13 +1664,7 @@ async def pay_salary_from_treasury(
                 "salary: не удалось вернуть %s в казну после ошибки user=%s",
                 coins, user_id,
             )
-        if frac_delta > 0 and not await return_pending_salary(
-            chat_id, user_id, day, frac_delta,
-        ):
-            logger.critical(
-                "salary: не удалось восстановить pending frac=%s user=%s",
-                frac_delta, user_id,
-            )
+        # Возврат входящего pending выполняет вызывающий _pay_pending_salary.
         return None
     if unpaid_coins > 0 and not await return_pending_salary(
         chat_id, user_id, day, unpaid_coins * 100,
@@ -1750,7 +1791,7 @@ async def apply_credit_interest_to_treasury(
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rs = await _exec(
         """UPDATE users
-           SET credit = credit + CAST(credit * ? / 100 AS INTEGER),
+           SET credit = credit + MAX(1, CAST(credit * ? / 100 AS INTEGER)),
                credit_interest_day = ?
            WHERE credit > 0
              AND credit_chat_id = ?
@@ -1965,25 +2006,29 @@ async def inc_message_and_day(chat_id: int, user_id: int, day: str) -> bool:
     return True
 
 
-async def top_messages(chat_id: int, limit: int = 50) -> List[tuple]:
+async def top_messages(chat_id: int, limit: int = 10) -> List[tuple]:
+    limit = max(1, min(int(limit), 10))
     rs = await _exec(
         """SELECT m.user_id, m.count
            FROM messages m
            WHERE m.chat_id = ?
-           ORDER BY m.count DESC LIMIT ?""",
+           ORDER BY m.count DESC, m.user_id ASC LIMIT ?""",
         [chat_id, limit],
     )
+    if getattr(rs, "error", False):
+        logger.error("top_messages: ошибка запроса")
+        return []
     return [(r[0], r[1]) for r in rs.rows]
 
 
-async def top_balances(limit: int = 20, chat_id: Optional[int] = None) -> List[tuple]:
+async def top_balances(limit: int = 10, chat_id: Optional[int] = None) -> List[tuple]:
     """Топ пользователей по доступному финансовому состоянию.
 
     Учитывает кошелёк и сберкнижку. Если передан chat_id, показывает
     только пользователей, которые писали в этом чате. Старый вызов
     top_balances(limit) остаётся совместимым с другими модулями.
     """
-    limit = max(1, min(int(limit), 100))
+    limit = max(1, min(int(limit), 10))
     if chat_id is None:
         rs = await _exec(
             """SELECT user_id,
@@ -2045,12 +2090,17 @@ async def inc_message_day(chat_id: int, user_id: int, day: str) -> None:
     )
 
 
-async def top_messages_day(chat_id: int, day: str, limit: int = 50) -> List[tuple]:
+async def top_messages_day(chat_id: int, day: str, limit: int = 10) -> List[tuple]:
+    limit = max(1, min(int(limit), 10))
     rs = await _exec(
         """SELECT user_id, count FROM messages_day
-           WHERE chat_id = ? AND day = ? ORDER BY count DESC LIMIT ?""",
+           WHERE chat_id = ? AND day = ?
+           ORDER BY count DESC, user_id ASC LIMIT ?""",
         [chat_id, day, limit],
     )
+    if getattr(rs, "error", False):
+        logger.error("top_messages_day: ошибка запроса")
+        return []
     return [(r[0], r[1]) for r in rs.rows]
 
 
