@@ -1056,17 +1056,18 @@ def build_app() -> Application:
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
             pr.on_new_member,
-        )
+        ),
+        group=-1,
     )
 
     if CHAT_ID:
         app.add_handler(
             MessageHandler(
                 filters.Chat(chat_id=CHAT_ID)
-                & ~filters.COMMAND
                 & ~filters.StatusUpdate.ALL,
                 pr.check_and_delete,
-            )
+            ),
+            group=-1,
         )
 
     return app
@@ -1095,7 +1096,7 @@ def main() -> None:
         url_path=WEBHOOK_PATH,
         webhook_url=f"{WEBHOOK_URL}/{WEBHOOK_PATH}",
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
+        drop_pending_updates=False,
     )
 
 
