@@ -16,6 +16,25 @@ logger = logging.getLogger(__name__)
 AURA_COOLDOWN_SEC = 3600
 
 
+async def _premium_marks(user_ids: list[int]) -> dict[int, str]:
+    """Возвращает значки активных Premium-подписок для пользователей."""
+    marks: dict[int, str] = {}
+    for uid in dict.fromkeys(int(value) for value in user_ids if int(value) > 0):
+        try:
+            subscription = await premium.get(uid)
+        except Exception:
+            logger.exception("Не удалось проверить Premium для пользователя %s", uid)
+            continue
+        if not subscription or not subscription.get("active"):
+            continue
+        plan = str(subscription.get("plan") or "").lower()
+        if plan == "pro":
+            marks[uid] = "💎"
+        elif plan == "base":
+            marks[uid] = "🤑"
+    return marks
+
+
 def _fmt_hms(seconds: int) -> str:
     seconds = max(0, int(seconds))
     h, rem = divmod(seconds, 3600)
@@ -131,6 +150,7 @@ async def cmd_aura_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     lines = ["✨ <b>Топ ауры</b>"]
+    marks = await _premium_marks([int(uid) for uid, _ in rows])
     for i, (uid, value) in enumerate(rows, start=1):
         name = str(uid)
         try:
@@ -140,5 +160,6 @@ async def cmd_aura_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             urow = await db.get_user(uid)
             if urow and urow.get("first_name"):
                 name = urow["first_name"]
-        lines.append(f"{_medal(i)} {escape(name)} — <b>{value}</b>")
+        mark = marks.get(int(uid), "")
+        lines.append(f"{_medal(i)} {escape(name)}{(' ' + mark) if mark else ''} — <b>{value}</b>")
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
