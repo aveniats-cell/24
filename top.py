@@ -33,6 +33,7 @@ from telegram.ext import ContextTypes
 
 import db
 import premium
+import accounts
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,19 @@ async def _resolve_display_names(
     ids = list(dict.fromkeys(int(uid) for uid in user_ids if int(uid) > 0))
     names = await db.get_user_display_names(ids)
     missing = [uid for uid in ids if not names.get(uid) or names[uid] == "Пользователь"]
+
+    # Для владельцев аккаунтов используем их уникальный логин.
+    # В топах хранится owner_tg_id, поэтому ищем аккаунт именно по нему.
+    for uid in list(missing):
+        try:
+            login = await accounts.get_login_for_owner(uid)
+            if login:
+                names[uid] = login
+                missing.remove(uid)
+        except Exception as exc:
+            logger.debug("Не удалось получить логин аккаунта %s: %s", uid, exc)
+
+    # Для пользователей без аккаунта пробуем получить имя из Telegram.
     for uid in missing:
         try:
             member = await context.bot.get_chat_member(chat_id=chat_id, user_id=uid)
