@@ -1,10 +1,4 @@
-"""Обработчики динамических команд из commands_dop.py.
-
-Бесплатные команды: триггер -> шаблон.
-Платные: триггер -> шаблон, только если пользователь купил пакет.
-Если у команды задан marriage_xp, XP начисляется только при использовании
-команды на действующем супруге/супруге автора в этом чате.
-"""
+"""Обработчики динамических команд из commands_dop.py."""
 import logging
 import re
 from html import escape
@@ -14,6 +8,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, MessageHandler, filters
 
+import accounts
 import db
 import utils
 import command_registry
@@ -29,8 +24,8 @@ def _fmt_template(template: str, actor_name: str, target_name: str) -> str:
 
 
 async def _resolve_target(update, context, text_after_trigger: str):
-    user = update.effective_user
     msg = update.effective_message
+    user = accounts.actual_user(update) or (msg.from_user if msg else None)
     if not user or not msg:
         return None
     target = await utils.resolve_target(update, context, text_after_trigger)
@@ -90,9 +85,9 @@ async def _handle_free(update, context, cmd: dict, clean_text: str):
 
 
 async def _handle_buy(update, context, cmd: dict, clean_text: str):
-    user = update.effective_user
-    chat = update.effective_chat
     msg = update.effective_message
+    user = accounts.actual_user(update) or (msg.from_user if msg else None)
+    chat = update.effective_chat
     if not user or not chat or not msg:
         return
     pocket_id = cmd["pocket_id"]
@@ -142,7 +137,6 @@ def _make_handler(cmd: dict):
 
 
 async def sync_to_db() -> None:
-    """Синхронизировать пакеты и команды из реестра с БД магазина."""
     for pocket in command_registry.get_pockets():
         try:
             await db.shop_pocket_upsert(
@@ -160,7 +154,6 @@ async def sync_to_db() -> None:
 
 
 def register(app) -> None:
-    """Зарегистрировать все команды из реестра в PTB."""
     for cmd in command_registry.get_commands():
         try:
             trigger_re, handler = _make_handler(cmd)
