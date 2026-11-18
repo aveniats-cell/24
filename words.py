@@ -234,4 +234,3 @@ async def show_all_words(update, context) -> None:
             chunk = candidate
     if chunk:
         await message.reply_text(chunk, parse_mode="HTML")
-;
