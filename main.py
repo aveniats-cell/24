@@ -47,6 +47,7 @@ import helper
 import home_menu
 import secretsms
 import abrakadabra
+import my_article
 
 
 logging.basicConfig(
@@ -523,6 +524,7 @@ async def post_init(app: Application) -> None:
     await db.init_db()
     await accounts.init_db()
     await words.init_db()
+    await my_article.init_db()
     await premium.init_db()
     await helper.init_db()
     secretsms.init_db()
@@ -918,6 +920,12 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(
         filters.REPLY & filters.Regex(r"^[+-]$"),
         reputation.cmd_vote,
+    ))
+
+    # Ежедневная случайная статья УК РФ (одна на аккаунт до 00:00 МСК).
+    app.add_handler(MessageHandler(
+        filters.Regex(r"(?i)^Моя\s+статья\s*$"),
+        my_article.cmd_my_article,
     ))
 
     app.add_handler(MessageHandler(
