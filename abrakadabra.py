@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 logger = logging.getLogger(__name__)
 
 MUTE_SECONDS = 10
-REPLY_TEXT = "Ты что, куку? 🥴 Ну вот тебе мут на 10 сек — наколдовал! 🪄"
+REPLY_TEXT = "Ты что, куку? 🥴 Ну вот тебе мут на 10 сек — наколдовала! 🪄"
 
 
 def is_gibberish(text: str) -> bool:
