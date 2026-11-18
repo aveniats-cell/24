@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]{2,}", re.UNICODE)
 _STOP_WORDS = set("""
-а ага ай ах бы был была были было быть в вам вас весь во вот все всё вы где да даже для до его ее её если есть ещё же за и из или им их к как ко когда кто ли либо мне много мы на над наш не него нее неё нет ни них но ну о об один она они оно от очень по под при про раз с сам со так такой там те тем то того тоже той только том ты у уже что чтобы эта эти это я i im am are is it its be been being the a an and or of to in on at for from with as this that these those you your we they he she was were have has had not no yes do does did but if so can could would should will just about all any
+а и 
 """.split())
 
 # Буферы в памяти: на сообщение нет ни одного обращения к базе данных.
@@ -212,7 +212,7 @@ async def show_all_words(update, context) -> None:
         await message.reply_text("📝 Пока статистики слов нет. Она начнёт собираться с новых сообщений.")
         return
 
-    lines = ["📝 <b>СТАТИСТИКА СЛОВ УЧАСТНИКОВ</b>", "━━━━━━━━━━━━━━━━━━"]
+    lines = ["📝 <b>СТАТИСТИКА СЛОВ УЧАСТНИКОВ</b>", "━━━━━━━━━━━━━━━"]
     for index, row in enumerate(rows, 1):
         name = row["first_name"] or row["username"] or f"ID {row['user_id']}"
         if row["username"]:
