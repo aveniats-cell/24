@@ -284,6 +284,46 @@ async def get_account_by_owner(owner_tg_id: int) -> Optional[dict]:
     }
 
 
+async def set_registration_date(owner_tg_id: int, date_iso: str) -> bool:
+    """Меняет дату создания аккаунта; для старых профилей без аккаунта — дату users."""
+    owner_tg_id = int(owner_tg_id)
+    rs = await db._exec(
+        "UPDATE accounts SET created_at = ?, updated_at = datetime('now') WHERE owner_tg_id = ?",
+        [f"{date_iso} 00:00:00", owner_tg_id],
+    )
+    if getattr(rs, "error", False):
+        return False
+    if (getattr(rs, "rows_affected", 0) or 0) > 0:
+        return True
+
+    rs = await db._exec(
+        "UPDATE users SET created_at = ? WHERE user_id = ?",
+        [f"{date_iso} 00:00:00", owner_tg_id],
+    )
+    return not getattr(rs, "error", False) and (getattr(rs, "rows_affected", 0) or 0) > 0
+
+
+async def get_registration_date(owner_tg_id: int) -> Optional[str]:
+    """Возвращает дату регистрации аккаунта, а для старых профилей — users.created_at."""
+    rs = await db._exec(
+        "SELECT created_at FROM accounts WHERE owner_tg_id = ? LIMIT 1",
+        [int(owner_tg_id)],
+    )
+    if getattr(rs, "error", False):
+        return None
+    if rs.rows:
+        return str(rs.rows[0][0] or "") or None
+
+    rs = await db._exec(
+        "SELECT created_at FROM users WHERE user_id = ? LIMIT 1",
+        [int(owner_tg_id)],
+    )
+    if getattr(rs, "error", False) or not rs.rows:
+        return None
+    return str(rs.rows[0][0] or "") or None
+
+
+
 async def get_login_for_owner(owner_tg_id: int) -> Optional[str]:
     acc = await get_account_by_owner(owner_tg_id)
     return acc["login"] if acc else None
