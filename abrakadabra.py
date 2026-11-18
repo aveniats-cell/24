@@ -1,9 +1,8 @@
-"""Автоматический шуточный мут за явную абракадабру."""
+"""Автоматический шуточный мут за точное слово «абракадабра»."""
 
 import asyncio
 import logging
-import re
-from datetime import timedelta
+from time import monotonic
 
 from telegram import ChatPermissions, Update
 from telegram.constants import ChatMemberStatus
@@ -15,15 +14,9 @@ logger = logging.getLogger(__name__)
 MUTE_SECONDS = 10
 REPLY_TEXT = "Ты что, куку? 🥴 Ну вот тебе мут на 10 сек — наколдовал! 🪄"
 
-# Очевидные случаи бессмысленного набора: длинные цепочки согласных
-# или очень длинное слово почти без гласных. Короткие сообщения не трогаем.
-_LETTERS_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+")
-_VOWELS = set("аеёиоуыэюяaeiouy")
-_LONG_CONSONANTS_RE = re.compile(r"(?i)[бвгджзйклмнпрстфхцчшщbcdfghjklmnpqrstvwxz]{6,}")
-
 
 def is_gibberish(text: str) -> bool:
-    """Срабатывает только на отдельное слово «абракадабра», без учёта регистра."""
+    """Только отдельное слово «абракадабра», без учёта регистра."""
     return (text or "").strip().casefold() == "абракадабра"
 
 
@@ -46,14 +39,19 @@ async def _restore_permissions(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-async def _restore_after_delay(bot, chat_id: int, user_id: int,
-                               permissions: ChatPermissions) -> None:
+async def _restore_after_delay(
+    bot, chat_id: int, user_id: int, permissions: ChatPermissions
+) -> None:
     await asyncio.sleep(MUTE_SECONDS)
     try:
         await bot.restrict_chat_member(
             chat_id=chat_id,
             user_id=user_id,
             permissions=permissions,
+        )
+        logger.info(
+            "Абракадабра-мут снят: chat_id=%s user_id=%s",
+            chat_id, user_id,
         )
     except TelegramError:
         logger.exception(
@@ -62,8 +60,10 @@ async def _restore_after_delay(bot, chat_id: int, user_id: int,
         )
 
 
-async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Выдаёт короткий мут за сообщение, похожее на случайный набор букв."""
+async def check_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Быстро ограничивает отправителя точного слова на 10 секунд."""
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -75,26 +75,37 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not is_gibberish(message.text or ""):
         return
 
+    started = monotonic()
     try:
+        # Единственный обязательный запрос до мута: проверяем, что это не админ.
         member = await context.bot.get_chat_member(chat.id, user.id)
-        # Не трогаем администраторов, владельца и пользователей,
-        # которые уже находятся под ограничением.
-        if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER,
-                             ChatMemberStatus.RESTRICTED):
+        if member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+            ChatMemberStatus.RESTRICTED,
+        ):
+            logger.info(
+                "Абракадабра пропущена: статус=%s chat_id=%s user_id=%s",
+                member.status, chat.id, user.id,
+            )
             return
 
-        chat_info = await context.bot.get_chat(chat.id)
-        restore_permissions = chat_info.permissions or ChatPermissions(
-            can_send_messages=True
-        )
+        # В объекте чата из Update обычно уже есть стандартные права.
+        # get_chat вызываем только если Telegram не прислал их в Update.
+        restore_permissions = chat.permissions
+        if restore_permissions is None:
+            chat_info = await context.bot.get_chat(chat.id)
+            restore_permissions = chat_info.permissions or ChatPermissions(
+                can_send_messages=True
+            )
 
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=user.id,
             permissions=ChatPermissions(can_send_messages=False),
         )
-        await message.reply_text(REPLY_TEXT)
 
+        # Сразу планируем снятие мута, чтобы оно не зависело от отправки ответа.
         if context.job_queue:
             context.job_queue.run_once(
                 _restore_permissions,
@@ -113,8 +124,22 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 )
             )
 
-    except TelegramError as exc:
-        logger.warning(
-            "Не удалось выдать абракадабра-мут: chat_id=%s user_id=%s error=%s",
-            chat.id, user.id, exc,
+        logger.info(
+            "Абракадабра-мут выдан: chat_id=%s user_id=%s elapsed=%.2fs",
+            chat.id, user.id, monotonic() - started,
+        )
+
+        # Ответ отправляется сразу после успешной выдачи мута.
+        try:
+            await message.reply_text(REPLY_TEXT)
+        except TelegramError:
+            logger.exception(
+                "Мут выдан, но ответ не отправлен: chat_id=%s user_id=%s",
+                chat.id, user.id,
+            )
+
+    except TelegramError:
+        logger.exception(
+            "Не удалось обработать абракадабру: chat_id=%s user_id=%s elapsed=%.2fs",
+            chat.id, user.id, monotonic() - started,
         )
