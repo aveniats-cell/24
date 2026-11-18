@@ -17,6 +17,7 @@ import db
 import resolver
 import sss
 import premium
+import words
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,12 @@ async def _render_base(context, chat_id: int, target_uid: int) -> str:
     total_msgs = rank[0] if rank else 0
 
     try:
+        word_stats = await words.get_user_stats(chat_id, target_uid)
+    except Exception as exc:
+        logger.warning("profile word stats: %s", exc)
+        word_stats = {"total_words": 0, "frequent_word": None}
+
+    try:
         reputation_data = await db.reputation_get(target_uid)
         reputation_score = reputation_data.get("score", 5.5)
     except Exception as exc:
@@ -201,6 +208,7 @@ async def _render_base(context, chat_id: int, target_uid: int) -> str:
         f"{login_line}"
         "━━━━━━━━━━━━━━━━━━\n"
         f"💬 <b>{total_msgs:,}</b> сообщений   ·   ⭐ Репутация: <b>{reputation_score}</b>\n"
+        f"📝 <b>{word_stats['total_words']:,}</b> слов   ·   💬 Частое: <b>{_safe(word_stats['frequent_word'] or '—')}</b>\n"
         f"🪙 <b>{balance:,}</b> монет   ·   💳 Кредит: <b>{credit:,}</b>\n"
         f"📖 Сберкнижка: <b>{savings:,}</b> монет\n"
         f"🏅 Награды: <b>{awards_total} ★</b>\n"
