@@ -61,37 +61,46 @@ async def _restore_after_delay(
 
 
 async def check_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    member=None,
 ) -> None:
-    """Быстро ограничивает отправителя точного слова на 10 секунд."""
+    """Выдаёт мут за точное слово; member можно передать после общей проверки."""
     message = update.effective_message
     chat = update.effective_chat
-    user = update.effective_user
+
+    # Берём настоящий Telegram ID, даже если accounts middleware подменил
+    # update.effective_user на владельца связанного аккаунта.
+    try:
+        import accounts
+        user = accounts.actual_user(update) or (message.from_user if message else None)
+    except Exception:
+        user = message.from_user if message else None
 
     if not message or not chat or not user or user.is_bot:
         return
-    if chat.type not in ("group", "supergroup"):
-        return
-    if not is_gibberish(message.text or ""):
+    if chat.type not in ("group", "supergroup") or not is_gibberish(message.text or ""):
         return
 
     started = monotonic()
     try:
-        # Единственный обязательный запрос до мута: проверяем, что это не админ.
-        member = await context.bot.get_chat_member(chat.id, user.id)
+        # Если member передан, этот Telegram-запрос уже выполнен параллельно
+        # с проверкой подписки в pr.check_and_delete.
+        if member is None:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+
         if member.status in (
             ChatMemberStatus.ADMINISTRATOR,
             ChatMemberStatus.OWNER,
             ChatMemberStatus.RESTRICTED,
         ):
             logger.info(
-                "Абракадабра пропущена: статус=%s chat_id=%s user_id=%s",
+                "Абракадабра пропущена: status=%s chat_id=%s user_id=%s",
                 member.status, chat.id, user.id,
             )
             return
 
-        # В объекте чата из Update обычно уже есть стандартные права.
-        # get_chat вызываем только если Telegram не прислал их в Update.
         restore_permissions = chat.permissions
         if restore_permissions is None:
             chat_info = await context.bot.get_chat(chat.id)
@@ -105,7 +114,6 @@ async def check_message(
             permissions=ChatPermissions(can_send_messages=False),
         )
 
-        # Сразу планируем снятие мута, чтобы оно не зависело от отправки ответа.
         if context.job_queue:
             context.job_queue.run_once(
                 _restore_permissions,
@@ -128,8 +136,6 @@ async def check_message(
             "Абракадабра-мут выдан: chat_id=%s user_id=%s elapsed=%.2fs",
             chat.id, user.id, monotonic() - started,
         )
-
-        # Ответ отправляется сразу после успешной выдачи мута.
         try:
             await message.reply_text(REPLY_TEXT)
         except TelegramError:
