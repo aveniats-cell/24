@@ -1042,9 +1042,32 @@ def build_app() -> Application:
 
     commands_dop_handlers.register(app)
 
-    # Абракадабра обрабатывается внутри pr.check_and_delete:
-    # проверка подписки и статуса участника идёт параллельно, без второго handler.
+    # ЕДИНАЯ обработка сообщений группы.
+    # pr.check_and_delete отвечает за проверку подписки и вызывает
+    # abrakadabra.check_message для точного слова «Абракадабра».
+    # Не регистрируй abrakadabra.check_message отдельным MessageHandler:
+    # это приведёт к дублированию проверок/действий.
+    if CHAT_ID:
+        app.add_handler(
+            MessageHandler(
+                filters.Chat(chat_id=CHAT_ID)
+                & ~filters.StatusUpdate.ALL,
+                pr.check_and_delete,
+            ),
+            group=-1,
+        )
 
+    # Сервисное событие о новых участниках не проходит через обычный
+    # обработчик выше из-за исключения StatusUpdate.ALL.
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.NEW_CHAT_MEMBERS,
+            pr.on_new_member,
+        ),
+        group=-1,
+    )
+
+    # Подсчёт сообщений выполняется позже и не блокирует pr.check_and_delete.
     if CHAT_ID:
         app.add_handler(
             MessageHandler(
@@ -1054,24 +1077,6 @@ def build_app() -> Application:
                 top.track_message,
             ),
             group=1,
-        )
-
-    app.add_handler(
-        MessageHandler(
-            filters.StatusUpdate.NEW_CHAT_MEMBERS,
-            pr.on_new_member,
-        ),
-        group=-1,
-    )
-
-    if CHAT_ID:
-        app.add_handler(
-            MessageHandler(
-                filters.Chat(chat_id=CHAT_ID)
-                & ~filters.StatusUpdate.ALL,
-                pr.check_and_delete,
-            ),
-            group=-1,
         )
 
     return app
