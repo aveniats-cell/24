@@ -922,9 +922,9 @@ def build_app() -> Application:
         reputation.cmd_vote,
     ))
 
-    # Ежедневная случайная статья УК РФ (одна на аккаунт до 00:00 МСК).
+    # Ежедневная статья УК РФ: только статьи с готовым объяснением.
     app.add_handler(MessageHandler(
-        filters.Regex(r"(?i)^Моя\s+статья\s*$"),
+        filters.Regex(r"(?i)^(?:Моя\s+статья|статья)\s*$"),
         my_article.cmd_my_article,
     ))
 
