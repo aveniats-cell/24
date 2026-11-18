@@ -105,8 +105,6 @@ class _CoinAmountReplyFilter(filters.MessageFilter):
         )
 
 
-
-
 async def _error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1047,6 +1045,20 @@ def build_app() -> Application:
     # в группе -1, поэтому для этого точного слова pr.check_and_delete
     # в той же группе уже не запускается (двойного мута не будет).
     if CHAT_ID:
+        logger.info("Регистрирую обработчики группы CHAT_ID=%s", CHAT_ID)
+
+        # ИЗМЕНЕНО: диагностический лог всех текстовых сообщений в группе.
+        # Стоит в group=-5 (раньше accounts.identity_middleware в -4),
+        # поэтому видит сообщение даже если его отфильтруют дальше.
+        # Убери этот блок, когда проблема с «абракадаброй» будет решена.
+        app.add_handler(
+            MessageHandler(
+                filters.Chat(chat_id=CHAT_ID) & filters.TEXT,
+                abrakadabra.debug_log,
+            ),
+            group=-5,
+        )
+
         app.add_handler(
             MessageHandler(
                 filters.Chat(chat_id=CHAT_ID)
@@ -1106,8 +1118,10 @@ def main() -> None:
     app = build_app()
 
     logger.info(
-        "Starting webhook server: port=%s public_url=%s path=/%s admin_id_configured=%s",
+        "Starting webhook server: port=%s public_url=%s path=/%s "
+        "admin_id_configured=%s chat_id_configured=%s chat_id=%s",
         PORT, WEBHOOK_URL, WEBHOOK_PATH, bool(ADMIN_ID),
+        bool(CHAT_ID), CHAT_ID,
     )
 
     app.run_webhook(
