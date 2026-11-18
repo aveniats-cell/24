@@ -1047,18 +1047,6 @@ def build_app() -> Application:
     if CHAT_ID:
         logger.info("Регистрирую обработчики группы CHAT_ID=%s", CHAT_ID)
 
-        # ИЗМЕНЕНО: диагностический лог всех текстовых сообщений в группе.
-        # Стоит в group=-5 (раньше accounts.identity_middleware в -4),
-        # поэтому видит сообщение даже если его отфильтруют дальше.
-        # Убери этот блок, когда проблема с «абракадаброй» будет решена.
-        app.add_handler(
-            MessageHandler(
-                filters.Chat(chat_id=CHAT_ID) & filters.TEXT,
-                abrakadabra.debug_log,
-            ),
-            group=-5,
-        )
-
         app.add_handler(
             MessageHandler(
                 filters.Chat(chat_id=CHAT_ID)
