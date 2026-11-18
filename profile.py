@@ -3,6 +3,7 @@
 import os
 import re
 import logging
+from datetime import datetime
 from html import escape
 
 from telegram import Update, InlineKeyboardMarkup
@@ -17,7 +18,6 @@ import db
 import resolver
 import sss
 import premium
-import words
 
 logger = logging.getLogger(__name__)
 
@@ -117,12 +117,6 @@ async def _render_base(context, chat_id: int, target_uid: int) -> str:
     total_msgs = rank[0] if rank else 0
 
     try:
-        word_stats = await words.get_user_stats(chat_id, target_uid)
-    except Exception as exc:
-        logger.warning("profile word stats: %s", exc)
-        word_stats = {"total_words": 0, "frequent_word": None}
-
-    try:
         reputation_data = await db.reputation_get(target_uid)
         reputation_score = reputation_data.get("score", 5.5)
     except Exception as exc:
@@ -200,6 +194,22 @@ async def _render_base(context, chat_id: int, target_uid: int) -> str:
         if account_login else ""
     )
 
+    registration_line = ""
+    try:
+        registration_raw = await accounts.get_registration_date(target_uid)
+        if registration_raw:
+            parsed = datetime.fromisoformat(str(registration_raw).replace("Z", "+00:00"))
+            months = (
+                "января", "февраля", "марта", "апреля", "мая", "июня",
+                "июля", "августа", "сентября", "октября", "ноября", "декабря",
+            )
+            registration_text = f"{parsed.day} {months[parsed.month - 1]} {parsed.year}"
+            registration_line = f"📅 Дата регистрации: <b>{registration_text}</b>\\n"
+    except (ValueError, TypeError) as exc:
+        logger.warning("profile registration date: %s", exc)
+    except Exception as exc:
+        logger.warning("profile registration date lookup: %s", exc)
+
     # Главная страница профиля.
     return (
         f"👤 <b>ПРОФИЛЬ УЧАСТНИКА</b>\n"
@@ -208,7 +218,6 @@ async def _render_base(context, chat_id: int, target_uid: int) -> str:
         f"{login_line}"
         "━━━━━━━━━━━━━━━━━━\n"
         f"💬 <b>{total_msgs:,}</b> сообщений   ·   ⭐ Репутация: <b>{reputation_score}</b>\n"
-        f"📝 <b>{word_stats['total_words']:,}</b> слов   ·   💬 Частое: <b>{_safe(word_stats['frequent_word'] or '—')}</b>\n"
         f"🪙 <b>{balance:,}</b> монет   ·   💳 Кредит: <b>{credit:,}</b>\n"
         f"📖 Сберкнижка: <b>{savings:,}</b> монет\n"
         f"🏅 Награды: <b>{awards_total} ★</b>\n"
@@ -217,6 +226,7 @@ async def _render_base(context, chat_id: int, target_uid: int) -> str:
         f"{relationship}\n"
         f"🛡️ Служба ССС: <b>{'Да' if sss_member else 'Нет'}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
+        f"{registration_line}"
         "<i>Выбери раздел для подробной информации.</i>"
     )
 
