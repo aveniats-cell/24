@@ -1042,12 +1042,23 @@ def build_app() -> Application:
 
     commands_dop_handlers.register(app)
 
-    # ЕДИНАЯ обработка сообщений группы.
-    # pr.check_and_delete отвечает за проверку подписки и вызывает
-    # abrakadabra.check_message для точного слова «Абракадабра».
-    # Не регистрируй abrakadabra.check_message отдельным MessageHandler:
-    # это приведёт к дублированию проверок/действий.
+    # МУТ ЗА «АБРАКАДАБРА» — отдельный обработчик, НЕ зависит от pr.py,
+    # подписки на канал и проверок обычных сообщений. Он стоит первым
+    # в группе -1, поэтому для этого точного слова pr.check_and_delete
+    # в той же группе уже не запускается (двойного мута не будет).
     if CHAT_ID:
+        app.add_handler(
+            MessageHandler(
+                filters.Chat(chat_id=CHAT_ID)
+                & filters.TEXT
+                & ~filters.COMMAND
+                & filters.Regex(r"(?i)^\s*абракадабра\s*$"),
+                abrakadabra.check_message,
+            ),
+            group=-1,
+        )
+
+        # Остальные сообщения идут через обычную проверку pr.py.
         app.add_handler(
             MessageHandler(
                 filters.Chat(chat_id=CHAT_ID)
