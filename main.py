@@ -3,7 +3,7 @@
 import os
 import re
 import logging
-from datetime import time as dtime, timezone
+from datetime import datetime, time as dtime, timezone
 from telegram import Update
 from telegram.request import HTTPXRequest
 from telegram.constants import ParseMode
@@ -119,6 +119,74 @@ async def cmd_start(
 ) -> None:
     """Показывает обновлённую главную панель."""
     await home_menu.cmd_menu(update, context)
+
+
+async def cmd_datarega(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Админ-команда: /datarega ДД-ММ-ГГГГ @username."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg:
+        return
+    if not user or not ADMIN_ID or user.id != ADMIN_ID:
+        await msg.reply_text("⛔ Только для администратора.")
+        return
+    if len(context.args) != 2:
+        await msg.reply_text(
+            "Формат: <code>/datarega 26-09-2026 @username</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        parsed_date = datetime.strptime(context.args[0], "%d-%m-%Y")
+    except ValueError:
+        await msg.reply_text("❌ Неверная дата. Используй формат ДД-ММ-ГГГГ.")
+        return
+
+    username = context.args[1].strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+        await msg.reply_text("❌ Укажи корректный @username Telegram.")
+        return
+
+    target_id = None
+    try:
+        target_id = await db.get_user_by_username(username)
+    except Exception:
+        logger.exception("datarega: lookup username failed")
+    if not target_id:
+        try:
+            resolved = await resolver.resolve_username(username)
+            if resolved:
+                target_id = resolved[0]
+        except Exception:
+            logger.exception("datarega: resolver failed")
+    if not target_id:
+        await msg.reply_text("❌ Не нашёл пользователя. Он должен хотя бы раз написать в чате.")
+        return
+
+    try:
+        owner_id = await accounts.data_id_for(int(target_id))
+        ok = await accounts.set_registration_date(
+            owner_id, parsed_date.strftime("%Y-%m-%d")
+        )
+    except Exception:
+        logger.exception("datarega: update failed")
+        ok = False
+    if not ok:
+        await msg.reply_text("⚠️ Не удалось изменить дату в базе данных.")
+        return
+
+    months = (
+        "января", "февраля", "марта", "апреля", "мая", "июня",
+        "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    )
+    date_text = f"{parsed_date.day} {months[parsed_date.month - 1]} {parsed_date.year}"
+    await msg.reply_text(
+        f"✅ Дата регистрации пользователя @{username} изменена на <b>{date_text}</b>.",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def cmd_ping(
@@ -625,6 +693,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(secretsms.read_callback, pattern=r"^secretread:"))
     app.add_handler(CommandHandler("ping", cmd_ping))
     app.add_handler(CommandHandler("stats", cmd_admin_stats))
+    app.add_handler(CommandHandler("datarega", cmd_datarega))
     app.add_handler(CommandHandler("check", pr.recheck_subscription))
     app.add_handler(CommandHandler("help", help_menu.cmd_help))
     app.add_handler(
