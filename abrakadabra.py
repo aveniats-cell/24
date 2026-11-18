@@ -22,6 +22,27 @@ def is_gibberish(text: str) -> bool:
     return (text or "").strip().casefold() == "абракадабра"
 
 
+async def debug_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Временный диагностический лог: пишет ЛЮБОЕ текстовое сообщение в чате.
+
+    Стоит в группе -5 (раньше всех остальных), поэтому видит сообщение
+    даже если фильтры других обработчиков его не пропускают.
+    Убери регистрацию этого хендлера в main.py, когда проблема будет найдена.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if msg is None or chat is None:
+        return
+    logger.info(
+        "ABRA-DEBUG: chat_id=%s chat_type=%s user_id=%s text=%r",
+        chat.id,
+        chat.type,
+        user.id if user else None,
+        msg.text,
+    )
+
+
 async def _restore_permissions(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Снимает временный мут через Telegram JobQueue."""
     data = context.job.data
@@ -64,18 +85,33 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     message = update.effective_message
     chat = update.effective_chat
 
+    logger.info(
+        "ABRA-CHECK: chat_id=%s text=%r",
+        chat.id if chat else None,
+        message.text if message else None,
+    )
+
     if message is None or chat is None:
+        logger.info("ABRA-CHECK: нет message или chat — выход")
         return
     if chat.type not in ("group", "supergroup"):
+        logger.info("ABRA-CHECK: тип чата %s — не группа, выход", chat.type)
         return
     if not is_gibberish(message.text or ""):
+        logger.info("ABRA-CHECK: текст не «абракадабра» — выход")
         return
 
     # Никаких accounts.actual_user() и связанных аккаунтов:
     # используем исключительно настоящий Telegram ID автора сообщения.
     telegram_user = message.from_user
     if telegram_user is None or telegram_user.is_bot:
+        logger.info("ABRA-CHECK: нет from_user или это бот — выход")
         return
+
+    logger.info(
+        "ABRA-CHECK: сработало! chat_id=%s user_id=%s",
+        chat.id, telegram_user.id,
+    )
 
     try:
         # Запоминаем обычные права чата, чтобы вернуть их через 10 секунд.
