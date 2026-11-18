@@ -20,6 +20,7 @@ from ui_design import InlineKeyboardButton
 
 import accounts
 import db
+import abrakadabra
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,70 @@ async def check_and_delete(
         bot_id = 0
 
     if bot_id and _is_reply_to_bot(msg, bot_id):
+        return
+
+    # Для точного слова выполняем проверку подписки и статуса в группе
+    # одновременно. Раньше эти Telegram-запросы шли последовательно
+    # (а затем ещё отдельно запускался обработчик абракадабры).
+    if abrakadabra.is_gibberish(msg.text or ""):
+        subscription_task = asyncio.create_task(
+            _cached_subscription(context.bot, real_user.id)
+        )
+        member_task = asyncio.create_task(
+            context.bot.get_chat_member(msg.chat_id, real_user.id)
+        )
+        sync_task = asyncio.create_task(_sync_user_if_needed(real_user))
+
+        results = await asyncio.gather(
+            subscription_task, member_task, sync_task,
+            return_exceptions=True,
+        )
+        ok, group_member, sync_result = results
+
+        if isinstance(sync_result, Exception):
+            logger.warning("upsert_user для абракадабры: %s", sync_result)
+
+        if isinstance(ok, Exception):
+            logger.error(
+                "Ошибка проверки подписки для абракадабры user=%s: %s",
+                real_user.id, ok,
+                exc_info=(type(ok), ok, ok.__traceback__),
+            )
+            return
+        if isinstance(group_member, Exception):
+            logger.warning(
+                "Не удалось проверить статус участника для абракадабры "
+                "user=%s chat=%s: %s",
+                real_user.id, msg.chat_id, group_member,
+            )
+            return
+
+        if ok is None:
+            # Не выдаём мут, если подписку не удалось достоверно проверить.
+            return
+
+        if not ok:
+            try:
+                await msg.delete()
+            except TelegramError as e:
+                logger.info("Не удалось удалить сообщение: %s", e)
+            try:
+                await context.bot.send_message(
+                    chat_id=msg.chat_id,
+                    text=_subscription_text(real_user),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_subscription_keyboard(),
+                    disable_web_page_preview=True,
+                )
+            except TelegramError as e:
+                logger.warning("Не удалось отправить напоминание: %s", e)
+            raise ApplicationHandlerStop
+
+        # Подписка подтверждена, статус группы уже проверен — передаём
+        # готовый результат, чтобы не делать второй get_chat_member.
+        await abrakadabra.check_message(
+            update, context, member=group_member
+        )
         return
 
     try:
