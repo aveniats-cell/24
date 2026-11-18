@@ -1042,17 +1042,8 @@ def build_app() -> Application:
 
     commands_dop_handlers.register(app)
 
-    # Автоматический 10-секундный мут за явную абракадабру.
-    app.add_handler(
-        MessageHandler(
-            filters.ChatType.GROUPS
-            & filters.TEXT
-            & ~filters.COMMAND
-            & ~filters.StatusUpdate.ALL,
-            abrakadabra.check_message,
-        ),
-        group=2,
-    )
+    # Абракадабра обрабатывается внутри pr.check_and_delete:
+    # проверка подписки и статуса участника идёт параллельно, без второго handler.
 
     if CHAT_ID:
         app.add_handler(
